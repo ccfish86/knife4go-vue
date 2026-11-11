@@ -15,6 +15,34 @@ import generate from "@babel/generator";
 }
 
 /**
+ * 将任意名称转换为合法的TypeScript/JavaScript标识符
+ * operationId、参数名中可能包含 '-'、'.' 等字符（如 xxx-fm、page.size），
+ * 直接作为函数名、变量名或类型名会生成非法代码
+ * @param {string} name
+ * @param {string} fallback
+ */
+export function toIdentifierName(name, fallback = 'apiParam') {
+  let res = name === null || name === undefined ? '' : String(name).trim();
+  if (res === '') {
+    return fallback;
+  }
+  res = res.replace(/[^\w$]/g, '_');
+  if (/^\d/.test(res)) {
+    res = '_' + res;
+  }
+  return res;
+}
+
+/**
+ * 获取参数在生成代码中的变量名
+ * 变量名必须是合法标识符，而URL上的参数名需要保持原始值（如 page.size）
+ * @param {object} param
+ */
+function getParamVariable(param) {
+  return param.varName || toIdentifierName(param.name, 'param');
+}
+
+/**
  *  当url含有路径参数时候获取url数组
  * @param {string} url
  */
@@ -54,18 +82,18 @@ export function getTemplateUrl(urls, pathParams, queryParams) {
   // 存在path但不存在query参数时
   else if(pathParams.length > 0 && queryParams.length === 0) {
     urls.map(u => quasis.push(getTemplateElement(u)));
-    pathParams.map(p => expressions.push(t.identifier(p.name)));
+    pathParams.map(p => expressions.push(t.identifier(getParamVariable(p))));
   }
   // 存在query但不存在path参数时
   else if(pathParams.length === 0 && queryParams.length > 0) {
     // 针对第一项的query特殊处理 /url/path?name=name
     quasis.push(getTemplateElement(`${urls[0]}?${queryParams[0].name}=`));
-    expressions.push(t.identifier(queryParams[0].name));
+    expressions.push(t.identifier(getParamVariable(queryParams[0])));
     // 第一项以后的处理方式
     queryParams.map((query, index) => {
       if(index > 0) {
         quasis.push(getTemplateElement(`&${query.name}=`));
-        expressions.push(t.identifier(query.name));
+        expressions.push(t.identifier(getParamVariable(query)));
       }
     })
     quasis.push(getTemplateElement('')); // 结尾 必须
@@ -80,12 +108,12 @@ export function getTemplateUrl(urls, pathParams, queryParams) {
         quasis.push(getTemplateElement(u));
       }
     });
-    pathParams.map(p => expressions.push(t.identifier(p.name)));
-    expressions.push(t.identifier(queryParams[0].name));
+    pathParams.map(p => expressions.push(t.identifier(getParamVariable(p))));
+    expressions.push(t.identifier(getParamVariable(queryParams[0])));
     queryParams.map((q, i) =>{
       if(i > 0) {
         quasis.push(getTemplateElement(`&${q.name}=`));
-        expressions.push(t.identifier(q.name));
+        expressions.push(t.identifier(getParamVariable(q)));
       }
     })
     quasis.push(getTemplateElement('')); // 结尾 必须
@@ -116,15 +144,29 @@ export function isLoopObject(obj) {
 
 /**
  * 获取响应参数
- * @param {object} api
+ * 引用类型通过schemaValue/refType匹配到模型后展开子属性
+ * @param {array} resParams
+ * @param {array} resRefParams
+ * @param {array} refStack 当前展开路径上的模型名，用于中断循环引用
  */
-function getResParams(resParams, resRefParams) {
+function getResParams(resParams, resRefParams, refStack) {
   const params = [];
+  if (!Array.isArray(resParams)) {
+    return params;
+  }
+  const stack = Array.isArray(refStack) ? refStack : [];
   resParams.map(res => {
-    const schema = resRefParams.filter(ref => ref.name === res.schemaValue)[0];
-    if(schema) {
+    const refName = res.schemaValue || res.refType;
+    // 循环引用的模型不再展开，否则类型定义会无限递归
+    if (!refName || stack.indexOf(refName) > -1) {
+      params.push(res);
+      return;
+    }
+    const schema = resRefParams.filter(ref => ref.name === refName)[0];
+    // 模型没有可展开属性时保持原样，避免生成空类型字面量
+    if (schema && Array.isArray(schema.params) && schema.params.length > 0) {
       res.children = schema.params
-      getResParams(res.children, resRefParams)
+      getResParams(res.children, resRefParams, stack.concat([refName]))
     }
     params.push(res);
   })
@@ -138,9 +180,13 @@ function getResParams(resParams, resRefParams) {
  */
 export function formatApi(api) {
   // console.log(api);
+  // operationId可能包含 '-'、'.' 等字符，直接作为函数名/接口名会生成非法代码；缺失时用method+url兜底
+  const rawName = api.operationId
+    ? String(api.operationId).split('Using')[0]
+    : `${api.methodType || 'api'}${api.url || ''}`;
   const config = {
-    name: api.operationId.split('Using')[0], // 函数名称
-    method: api.methodType.toLowerCase(), // http方法;
+    name: toIdentifierName(rawName, 'api'), // 函数名称
+    method: String(api.methodType || 'get').toLowerCase(), // http方法;
     url: api.url,
     pathParams: [], // path请求参数
     queryParams: [], // query请求参数
@@ -153,12 +199,14 @@ export function formatApi(api) {
         case 'path':
           config.pathParams.push({
             name: p.name,
+            varName: toIdentifierName(p.name, 'id'),
             type: getBaseType(p.type)
           });
           break;
         case 'query':
           config.queryParams.push({
             name: p.name,
+            varName: toIdentifierName(p.name, 'query'),
             type:  getBaseType(p.type)
           });
           break;
@@ -189,6 +237,9 @@ export function formatApi(api) {
       type = 'array';
     } else if(api.responseJson instanceof Object) {
       type = 'object';
+    } else if(api.responseBasicType && api.responseText) {
+      // 响应体是基础类型（如 string、number）时直接使用其类型，避免生成空接口
+      type = getBaseType(api.responseText);
     }
     // else {
     //   throw new Error('类型不正确')
@@ -204,37 +255,72 @@ export function formatApi(api) {
 
 /**
  * 获取基本类型
+ * 文档解析阶段会在类型后追加format（如 string(date-time)、integer(int64)），
+ * 且不同框架输出的类型名不统一，这里统一归一化为TypeScript可用的基础类型
  * @param {string} type
  */
 export function getBaseType(type) {
-  let res = null;
-  switch(type) {
+  if (type === null || type === undefined) {
+    return 'any';
+  }
+  let raw = String(type).trim();
+  if (raw === '') {
+    return 'any';
+  }
+  // 去掉format后缀
+  const formatMatch = raw.match(/^([A-Za-z_$][\w$.]*)\s*\((.*)\)$/);
+  if (formatMatch) {
+    raw = formatMatch[1];
+  }
+  const lower = raw.toLowerCase();
+  switch(lower) {
     case 'string':
-      res = 'string'
-      break;
+    case 'char':
+    case 'character':
+    case 'uuid':
+    case 'text':
+    case 'byte':
+    case 'binary':
+    case 'password':
+    case 'email':
+    case 'date':
+    case 'time':
+    case 'datetime':
+    case 'timestamp':
+      return 'string';
     case 'boolean':
-      res = 'boolean';
-      break;
+    case 'bool':
+      return 'boolean';
     case 'number':
-      res = 'number';
-      break;
+    case 'integer':
+    case 'int':
+    case 'long':
+    case 'short':
+    case 'bigdecimal':
+    case 'biginteger':
+    case 'decimal':
+    case 'double':
+    case 'float':
+      return 'number';
     case 'array':
-      res = 'array';
-      break;
+    case 'list':
+    case 'set':
+    case 'collection':
+      return 'array';
     case 'object':
-      res = 'object';
-      break;
-    case 'integer(int32)':
-      res = 'number';
-      break;
-    case 'integer(int64)':
-      res = 'number';
-      break;
+    case 'map':
+    case 'json':
+    case 'any':
+      return 'object';
     default:
-      res = 'object';
       break;
   }
-  return res;
+  // 日期时间类引用类型（如 java.time.LocalDateTime）按字符串处理
+  if (/date|time/i.test(lower)) {
+    return 'string';
+  }
+  // 其余视为引用类型，后续按对象展开
+  return 'object';
 }
 
 /**
@@ -247,17 +333,32 @@ function getReferenceTSType (name) {
 }
 
 /**
- * 获取Record<string, unknown>泛型
- * @returns
+ * 获取基础类型对应的TypeScript类型节点
+ * @param {string} type
  */
-function getRecordAny() {
-  return t.tsTypeReference(
-    t.identifier('Record'),
-    t.tsTypeParameterInstantiation([
-      t.tsStringKeyword(),
-      t.tsUnknownKeyword()
-    ])
-  )
+function getSimpleTsType(type) {
+  const baseType = getBaseType(type);
+  if (baseType === 'array') {
+    return t.tsArrayType(t.tsAnyKeyword());
+  }
+  if (baseType === 'object' || baseType === 'any') {
+    // object/any 这类名称不是有效的TS类型引用，回退为any
+    return t.tsAnyKeyword();
+  }
+  return getReferenceTSType(baseType);
+}
+
+/**
+ * 获取属性名节点
+ * 非法标识符需要转换成字符串字面量（如 "user-name": string）
+ * @param {string} name
+ */
+function getPropertyKey(name) {
+  const key = name === null || name === undefined ? '' : String(name);
+  if (/^[A-Za-z_$][\w$]*$/.test(key)) {
+    return t.identifier(key);
+  }
+  return t.stringLiteral(key);
 }
 
 /**
@@ -268,7 +369,7 @@ function getRecordAny() {
 export function getInterfaceBody(props, openOptional) {
  return props.map(p => {
     return t.tsPropertySignature(
-      t.identifier(p.name),
+      getPropertyKey(p.name),
       t.tsTypeAnnotation(getTsType(p, getBaseType(p.type), openOptional)),
       openOptional ? !p.require : false,
     )
@@ -286,20 +387,31 @@ export function getTsType(prop, type, openOptional) {
   if (baseType.includes(type)) {
     return getReferenceTSType(type);
   }
+  if (type === 'any') {
+    return t.tsAnyKeyword();
+  }
+  // 空children不能作为类型字面量，否则会生成不可用的 {} 类型
+  const children = Array.isArray(prop.children) && prop.children.length > 0 ? prop.children : null;
   if (type === 'object') {
-    if(prop.children) {
-      const InterfaceBody = getInterfaceBody(prop.children, openOptional);
+    if(children) {
+      const InterfaceBody = getInterfaceBody(children, openOptional);
       return t.tsTypeLiteral(InterfaceBody);
     } else {
-      return getRecordAny();
+      // 无法解析出结构时使用any，避免Record<string, unknown>导致字段无法直接访问
+      return t.tsAnyKeyword();
     }
   }
   if (type === 'array') {
-    if(prop.children) {
-      const InterfaceBody = getInterfaceBody(prop.children, openOptional);
+    if(children) {
+      const InterfaceBody = getInterfaceBody(children, openOptional);
       return t.tsArrayType(t.tsTypeLiteral(InterfaceBody));
     } else {
-      return t.tsArrayType(getRecordAny());
+      // 基础类型数组直接使用对应类型，如 string[]
+      const itemType = getBaseType(prop.schemaValue || prop.refType || '');
+      if (baseType.includes(itemType)) {
+        return t.tsArrayType(getReferenceTSType(itemType));
+      }
+      return t.tsArrayType(t.tsAnyKeyword());
     }
   }
   return getReferenceTSType(type);
@@ -335,17 +447,20 @@ export function getComment(api) {
   common += ` * ${summary}\n`
   Array.isArray(parameters) && parameters.map(parameter => {
     if(parameter.in === 'path') {
-      common += ` * @param {string} ${parameter.name} ${parameter.description}\n `
+      // 实际生成的变量名可能已被转成合法标识符（如 order-id -> order_id），注释需保持一致
+      common += ` * @param {string} ${toIdentifierName(parameter.name, 'param')} ${parameter.description}\n `
     }
     if(parameter.in === 'query') {
-      common += ` * @param {string} ${parameter.name} ${parameter.description}\n `
+      common += ` * @param {string} ${toIdentifierName(parameter.name, 'param')} ${parameter.description}\n `
     }
     if(parameter.in === 'body') {
-      if(parameter.def && parameter.def.type === 'object' || parameter.type === "object") {
-        common += ` * @param {object} params ${parameter.description}\n`
-        common = getChildCommon(common, parameter.children, 'params')
-      } else if(parameter.def && parameter.def.type === 'array'|| parameter.type === "array") {
-        common += ` * @param {array} params ${parameter.description}\n`
+      const bodyType = parameter.type === 'array' ? 'array' : 'object';
+      const hasChildren = Array.isArray(parameter.children) && parameter.children.length > 0;
+      if(bodyType === 'array' || hasChildren || parameter.type === 'object') {
+        common += ` * @param {${bodyType}} params ${parameter.description}\n`
+        if(bodyType === 'object') {
+          common = getChildCommon(common, parameter.children, 'params')
+        }
       }
     }
   })
@@ -360,15 +475,23 @@ export function getComment(api) {
  * @returns
  */
 export function getTypeAnnotation (param) {
-  // url参数取name，body参数取data,query参数取params
-  let arg = t.identifier(param.name);
-  // 缺少ref类型转化
-  arg.typeAnnotation = t.typeAnnotation(
-    t.genericTypeAnnotation(
-      t.identifier(param.type),
-      null
-    ),
-  );
+  // 参数名可能是 file-id、page.size 等非法标识符，需要转换后才能生成变量
+  let arg = t.identifier(toIdentifierName(param.name, 'params'));
+  const baseType = getBaseType(param.type);
+  let annotation = null;
+  if (baseType === 'array') {
+    annotation = t.tsArrayType(t.tsAnyKeyword());
+  } else if (baseType === 'object' || baseType === 'any') {
+    // 自定义类型（如 xxxParams）保留类型名，object/any 这类基础名称回退为any
+    const rawName = toIdentifierName(param.type, '');
+    annotation = rawName !== '' && rawName !== 'object' && rawName !== 'any'
+      ? t.tsTypeReference(t.identifier(rawName))
+      : t.tsAnyKeyword();
+  } else {
+    annotation = t.tsTypeReference(t.identifier(baseType));
+  }
+  // TS类型注解需要使用tsTypeAnnotation，否则Flow类型校验会报错
+  arg.typeAnnotation = t.tsTypeAnnotation(annotation);
   return arg;
 }
 
@@ -392,10 +515,10 @@ export function getJsFunctionDeclaration(api) {
   // 构建request请求的路径参数
   requestParams.push(getTemplateUrl(getUrls(url), pathParams, queryParams));
   [].concat(pathParams, queryParams).map(param => {
-    funParams.push(t.identifier(param.name));
+    funParams.push(t.identifier(getParamVariable(param)));
   })
   bodyParams.map(param => {
-    const temp = t.identifier(param.name);
+    const temp = t.identifier(toIdentifierName(param.name, 'params'));
     funParams.push(temp);
     requestParams.push(temp);
   })
@@ -424,25 +547,17 @@ export function getJsFunctionDeclaration(api) {
  * @returns
  */
 export function getTsInterfaceDeclaration(prop, interfaceName, openOptional) {
+  // 接口名可能包含非法字符，需要归一化后才能生成合法代码
+  const name = t.identifier(toIdentifierName(interfaceName, 'ApiType'));
+  const children = Array.isArray(prop.children) && prop.children.length > 0 ? prop.children : null;
   let declaration = null;
-  if(prop.type === 'object') {
-    if(!prop.children) return '\n';
-    const InterfaceBody = getInterfaceBody(prop.children, openOptional);
-    declaration = t.tsInterfaceDeclaration(
-      t.identifier(interfaceName),
-      t.tsInterfaceBody(InterfaceBody),
-    )
-  } else if (prop.type === 'array') {
-    if(!prop.children) return '\n';
-    const InterfaceBody = getInterfaceBody(prop.children, openOptional);
-    declaration = t.tsInterfaceDeclaration(
-      t.identifier(interfaceName),
-      t.tsInterfaceBody(InterfaceBody),
-    )
+  if (!children) {
+    // 没有可展开的子属性时生成类型别名，避免出现空interface或Record<string, unknown>这类不可用类型
+    declaration = t.tsTypeAliasDeclaration(name, getSimpleTsType(prop.type));
   } else {
     declaration = t.tsInterfaceDeclaration(
-      t.identifier(interfaceName),
-      t.tsInterfaceBody([]),
+      name,
+      t.tsInterfaceBody(getInterfaceBody(children, openOptional)),
     )
   }
   return generate(t.exportNamedDeclaration(declaration)).code + '\n\n';
@@ -473,13 +588,10 @@ export function getTsInterfaceDeclaration(prop, interfaceName, openOptional) {
     funParams.push(getTypeAnnotation(param));
   })
   bodyParams.map(param => {
-    // 指定接口类型名称
-    if(param.type === 'array') {
-      funParams.push(getTypeAnnotation({name: param.name, type: `any[]`}));
-    } else if(param.type === 'object') {
-      funParams.push(getTypeAnnotation({name: param.name, type: `${interfaceName}Params`}));
-    }
-    requestParams.push(t.identifier(param.name));
+    // 指定接口类型名称：数组请求体用any[]，对象请求体用自动生成的Params接口
+    const bodyType = param.type === 'array' ? 'array' : `${interfaceName}Params`;
+    funParams.push(getTypeAnnotation({ name: param.name, type: bodyType }));
+    requestParams.push(t.identifier(toIdentifierName(param.name, 'params')));
   })
   const declaration = t.functionDeclaration(
     t.identifier(name),

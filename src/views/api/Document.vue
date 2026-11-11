@@ -96,7 +96,7 @@
     <!--响应参数需要判断是否存在多个code-schema的情况-->
     <div v-if="api.multipartResponseSchema">
       <a-tabs @change="multipartTabCodeChanges">
-        <a-tab-pane v-for="resp in multipCodeDatas" :key="resp.code" :tab="$t('doc.responseHeaderParams')">
+        <a-tab-pane v-for="resp in multipCodeDatas" :key="resp.code" :tab="responseTabTitle(resp)">
           <!--判断响应头-->
           <div v-if="resp.responseHeaderParameters">
               <!-- 响应Header -->
@@ -115,10 +115,17 @@
           </a-table>
             <!-- 响应示例 -->
           <div class="api-title" v-html="$t('doc.responseExample')"></div>
+          <!-- OAS3允许一个媒体类型声明多个命名示例，提供下拉框切换 -->
+          <div v-if="hasResponseExamples(resp)" class="knife4j-response-example-select">
+            <a-select size="small" style="min-width: 220px" :value="selectedExampleIndex(resp)"
+              @change="val => responseExampleChange(resp, val)">
+              <a-select-option v-for="(exampleInfo, index) in resp.responseTextArray" :key="index" :value="index">
+                {{ responseExampleLabel(exampleInfo, index) }}
+              </a-select-option>
+            </a-select>
+          </div>
           <a-row :id="'knife4jDocumentShowEditor' + api.id + resp.code" style="display: block">
-            <editor-show @showDescription="showResponseEditFieldDescription" :value="
-              resp.responseBasicType ? resp.responseText : resp.responseValue
-            "></editor-show>
+            <editor-show @showDescription="showResponseEditFieldDescription" :value="responseExampleValue(resp)"></editor-show>
           </a-row>
 
           <!-- <editor :value="resp.responseBasicType ? resp.responseText : resp.responseValue" @init="multiResponseSampleEditorInit" lang="json" theme="eclipse" width="100%" :height="editorMultiHeight"></editor> -->
@@ -145,12 +152,17 @@
        </a-table>
        <div class="api-title" v-html="$t('doc.responseExample')">
        </div>
+       <!-- OAS3允许一个媒体类型声明多个命名示例，提供下拉框切换 -->
+       <div v-if="hasResponseExamples(multipData)" class="knife4j-response-example-select">
+         <a-select size="small" style="min-width: 220px" :value="selectedExampleIndex(multipData)"
+           @change="val => responseExampleChange(multipData, val)">
+           <a-select-option v-for="(exampleInfo, index) in multipData.responseTextArray" :key="index" :value="index">
+             {{ responseExampleLabel(exampleInfo, index) }}
+           </a-select-option>
+         </a-select>
+       </div>
        <a-row :id="'knife4jDocumentShowEditor' + api.id" style="display: block">
-         <editor-show @showDescription="showResponseEditFieldDescription" :value="
-           multipData.responseBasicType
-             ? multipData.responseText
-             : multipData.responseValue
-         "></editor-show>
+         <editor-show @showDescription="showResponseEditFieldDescription" :value="responseExampleValue(multipData)"></editor-show>
 
        </a-row>
      </div>
@@ -175,6 +187,15 @@
  import { useknife4jModels } from '@/store/knife4jModels.js'
  import { useI18n } from 'vue-i18n'
  import { message } from 'ant-design-vue'
+
+ // 安全地构建正则：忽略规则来自文档配置的字符串，非法表达式时视为不匹配
+ function safeRegexTest(pattern, value, flags) {
+   try {
+     return new RegExp(pattern, flags).test(value);
+   } catch (e) {
+     return false;
+   }
+ }
 
  export default {
    name: "Document",
@@ -473,7 +494,7 @@
                                `${param.name}.${name}`
                              ) ||
                              ignoreParameterAllKeys.some(key =>
-                               new RegExp(`^(${key}$|${key}[.[])`).test(name) || eval('/' + key + '/g').test(name)
+                               safeRegexTest(`^(${key}$|${key}[.[])`, name) || safeRegexTest(key, name, 'g')
                              )
                            ) //  处理 json 提交
                          );
@@ -514,6 +535,14 @@
                    }
                  }
                }
+             }
+             // 内联结构请求体（如allOf组合）在解析阶段已生成字段列表
+             if (!KUtils.arrNotEmpty(param.children) && KUtils.arrNotEmpty(param.childParams)) {
+               param.children = param.childParams.map(child => {
+                 const newObj = that.copyNewParameter(child);
+                 newObj.pid = param.id;
+                 return newObj;
+               });
              }
              reqParameters.push(param);
            }
@@ -697,90 +726,178 @@
        // 添加自定义属性
        that.multipCode = this.api.multipartResponseSchema;
        that.multipCodeDatas = [];
-       // 这里不
        that.multipData = {};
        let rcodes = this.api.responseCodes;
-       // console.log("rcodes")
-       // console.log(rcodes)
        if (rcodes != null && rcodes != undefined) {
+         // 单响应展示时优先选择成功响应，否则取第一个有内容的响应
+         var currentResponse = null;
+         var firstResponse = null;
          rcodes.forEach(function (rc) {
-           // 遍历
-           if (rc.schema != undefined && rc.schema != null) {
-             var respdata = [];
-             if (
-               rc.responseParameters != null &&
-               rc.responseParameters.length > 0
-             ) {
-               respdata = respdata.concat(rc.responseParameters);
-             }
-             if (
-               rc.responseTreetableRefParameters != null &&
-               rc.responseTreetableRefParameters.length > 0
-             ) {
-               rc.responseTreetableRefParameters.forEach(function (ref) {
-                 respdata = respdata.concat(ref.params);
-               });
-             }
-             let nrecodedatas = [];
-             // 遍历得到新的符合antd的树形结构
-             if (respdata != null && respdata.length > 0) {
-               respdata.forEach(function (param) {
-                 if (param.pid == "-1") {
-                   param.children = [];
-                   // 判断该参数是否存在schema参数
-                   if (param.schema) {
-                     // 判断当前缓存是否存在
-                     var schemaName = param.schemaValue;
-                     //  console.log("schemaName:"+schemaName)
-                     if (KUtils.checkUndefined(schemaName)) {
-                       //  //console("schemaValue--checkUndefined");
-                       if (that.knife4jModels.exists(key, schemaName)) {
-                         // //console("存在-不用查找---" + schemaName);
-                         // //console(that.$Knife4jModels.instance);
-                         var model = that.knife4jModels.getByModelName(
-                           key,
-                           schemaName
-                         );
-                         model = that.swagger.analysisDefinitionRefTableModel(that.swaggerInstance.id, model);
-                         if (model && model.params) {
-                           param.children = model.params.map(child => {
-                             const newObj = that.copyNewParameter(child);
-                             newObj.pid = param.id;
-                             return newObj;
-                           });
-                         }
-                       } else {
-                         // //console("schemavalue--Not Existis");
+           // OAS3中响应可以只声明examples/headers而没有schema，不能仅以schema作为展示依据
+           var hasSchema = rc.schema != undefined && rc.schema != null;
+           var hasContent = hasSchema || KUtils.arrNotEmpty(rc.responseParameters) ||
+             KUtils.arrNotEmpty(rc.responseHeaderParameters) ||
+             KUtils.strNotBlank(rc.responseValue) || KUtils.strNotBlank(rc.responseText) ||
+             KUtils.arrNotEmpty(rc.responseTextArray);
+           if (!hasContent) {
+             return;
+           }
+           var respdata = [];
+           if (
+             rc.responseParameters != null &&
+             rc.responseParameters.length > 0
+           ) {
+             respdata = respdata.concat(rc.responseParameters);
+           }
+           if (
+             rc.responseTreetableRefParameters != null &&
+             rc.responseTreetableRefParameters.length > 0
+           ) {
+             rc.responseTreetableRefParameters.forEach(function (ref) {
+               respdata = respdata.concat(ref.params);
+             });
+           }
+           let nrecodedatas = [];
+           // 遍历得到新的符合antd的树形结构
+           if (respdata != null && respdata.length > 0) {
+             respdata.forEach(function (param) {
+               if (param.pid == "-1") {
+                 param.children = [];
+                 // 判断该参数是否存在schema参数
+                 if (param.schema) {
+                   // 判断当前缓存是否存在
+                   var schemaName = param.schemaValue;
+                   if (KUtils.checkUndefined(schemaName)) {
+                     if (that.knife4jModels.exists(key, schemaName)) {
+                       var model = that.knife4jModels.getByModelName(
+                         key,
+                         schemaName
+                       );
+                       model = that.swagger.analysisDefinitionRefTableModel(that.swaggerInstance.id, model);
+                       if (model && model.params) {
+                         param.children = model.params.map(child => {
+                           const newObj = that.copyNewParameter(child);
+                           newObj.pid = param.id;
+                           return newObj;
+                         });
                        }
                      }
                    }
-
-                   // that.findModelChildren(md, respdata);
-                   // 查找后如果没有,则将children置空
-                   if (param.children.length == 0) {
-                     param.children = null;
-                   }
-                   nrecodedatas.push(param);
                  }
-               });
-             }
-             var nresobj = { ...rc, data: nrecodedatas };
-             if (!that.multipCode) {
-               that.multipData = nresobj;
-             }
+
+                 // 查找后如果没有,则将children置空
+                 if (param.children.length == 0) {
+                   param.children = null;
+                 }
+                 nrecodedatas.push(param);
+               }
+             });
+           }
+           var nresobj = { ...rc, data: nrecodedatas };
+           // 多响应结构时按状态码分页签展示
+           if (that.multipCode) {
              that.multipCodeDatas.push(nresobj);
            }
+           if (firstResponse == null) {
+             firstResponse = nresobj;
+           }
+           if (currentResponse == null && /^2\d\d$/.test(String(rc.code))) {
+             currentResponse = nresobj;
+           }
          });
-         var multipKeys = Object.keys(that.multipData);
-         if (KUtils.arrNotEmpty(rcodes) && !KUtils.arrNotEmpty(multipKeys)) {
-           var rc = rcodes[0];
-           if (KUtils.strNotBlank(rc.schemaTitle)) {
-             var nresobj = { ...rc, data: [] };
-             that.multipData = nresobj;
+         that.multipData = currentResponse || firstResponse || {};
+       }
+     },
+     /**
+      * 响应页签标题：状态码 + 描述，为避免不同状态码的页签标题完全相同
+      */
+     responseTabTitle(resp) {
+       if (resp == null || resp == undefined) {
+         return "";
+       }
+       var description = KUtils.toString(resp.description, "");
+       return description != "" ? resp.code + " " + description : KUtils.toString(resp.code, "");
+     },
+     /**
+      * 是否声明了多个命名示例（OAS3 examples）
+      */
+     hasResponseExamples(resp) {
+       return resp != null && resp != undefined && KUtils.arrNotEmpty(resp.responseTextArray) && resp.responseTextArray.length > 1;
+     },
+     /**
+      * 当前选中的示例下标，缺省为第一个
+      */
+     selectedExampleIndex(resp) {
+       if (resp == null || resp == undefined) {
+         return 0;
+       }
+       var index = resp.exampleSelectedIndex;
+       if (typeof index != "number" || index < 0 || index >= (resp.responseTextArray || []).length) {
+         return 0;
+       }
+       return index;
+     },
+     /**
+      * 示例下拉框展示文案，优先summary，其次description，最后使用下标
+      */
+     responseExampleLabel(exampleInfo, index) {
+       if (exampleInfo == null || exampleInfo == undefined) {
+         return KUtils.toString(index + 1, "");
+       }
+       if (KUtils.strNotBlank(exampleInfo.summary)) {
+         return exampleInfo.summary;
+       }
+       if (KUtils.strNotBlank(exampleInfo.description)) {
+         return exampleInfo.description;
+       }
+       return KUtils.toString(index + 1, "");
+     },
+     /**
+      * 响应示例内容，多示例时按当前选中项展示
+      */
+     responseExampleValue(resp) {
+       if (resp == null || resp == undefined) {
+         return "";
+       }
+       if (KUtils.arrNotEmpty(resp.responseTextArray)) {
+         var exampleInfo = resp.responseTextArray[this.selectedExampleIndex(resp)];
+         if (exampleInfo != null && exampleInfo != undefined) {
+           if (KUtils.strNotBlank(exampleInfo.externalValue)) {
+             return exampleInfo.externalValue;
+           }
+           if (KUtils.checkUndefined(exampleInfo.example)) {
+             return typeof exampleInfo.example == "string"
+               ? exampleInfo.example
+               : KUtils.json5stringifyFormat(exampleInfo.example, null, "\t");
            }
          }
        }
-       // console.log(that.multipData);
+       if (resp.responseBasicType) {
+         return KUtils.toString(resp.responseText, "");
+       }
+       if (KUtils.checkUndefined(resp.responseValue)) {
+         return typeof resp.responseValue == "string"
+           ? resp.responseValue
+           : KUtils.json5stringifyFormat(resp.responseValue, null, "\t");
+       }
+       return "";
+     },
+     /**
+      * 切换响应示例
+      */
+     responseExampleChange(resp, index) {
+       if (resp == null || resp == undefined) {
+         return;
+       }
+       resp.exampleSelectedIndex = index;
+       // 保持响应Json与当前展示的示例一致
+       var exampleInfo = (resp.responseTextArray || [])[index];
+       if (exampleInfo != null && exampleInfo != undefined && KUtils.checkUndefined(exampleInfo.example)) {
+         resp.responseJson = exampleInfo.example;
+       }
+       setTimeout(() => {
+         this.showResponseEditFieldDescription();
+       }, 300);
      },
      showResponseEditFieldDescription(p) {
        // 显示说明

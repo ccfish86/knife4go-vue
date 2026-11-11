@@ -60,32 +60,25 @@ import ThreeMenu from "@/components/SiderMenu/ThreeMenu.vue";
 //右键菜单
 import ContextMenu from "@/components/common/ContextMenu.vue";
 import constant from "@/store/constants";
-import { computed, markRaw, onUpdated, reactive, shallowRef, watch, onMounted } from 'vue'
+import { computed, defineAsyncComponent, onUpdated, reactive, watch, onMounted } from 'vue'
 import { useGlobalsStore } from '@/store/modules/global.js'
 import { useHeadersStore } from '@/store/modules/header.js'
 import { useRoute, useRouter } from 'vue-router'
 import localStore from '@/store/local.js'
 import { useI18n } from 'vue-i18n'
-import Main from '@/views/index/Main.vue'
-import Othermarkdown from '@/views/othermarkdown/index.vue'
-import Authorize from '@/views/settings/Authorize.vue'
-import GlobalParameters from '@/views/settings/GlobalParameters.vue'
-import Settings from '@/views/settings/Settings.vue'
-import SwaggerModels from '@/views/settings/SwaggerModels.vue'
-import OfficelineDocument from '@/views/settings/OfficelineDocument.vue'
-import ApiInfo from '@/views/api/index.vue'
 
 const constMenuWidth = 320;
 
+// 页签内容按需异步加载，避免所有页面被静态拉进入口chunk
 const componentMap = {
-  'Main': Main,
-  'Othermarkdown': Othermarkdown,
-  'Authorize': Authorize,
-  'GlobalParameters': GlobalParameters,
-  'Settings': Settings,
-  'SwaggerModels': SwaggerModels,
-  "OfficelineDocument": OfficelineDocument,
-  "ApiInfo": ApiInfo,
+  'Main': defineAsyncComponent(() => import('@/views/index/Main.vue')),
+  'Othermarkdown': defineAsyncComponent(() => import('@/views/othermarkdown/index.vue')),
+  'Authorize': defineAsyncComponent(() => import('@/views/settings/Authorize.vue')),
+  'GlobalParameters': defineAsyncComponent(() => import('@/views/settings/GlobalParameters.vue')),
+  'Settings': defineAsyncComponent(() => import('@/views/settings/Settings.vue')),
+  'SwaggerModels': defineAsyncComponent(() => import('@/views/settings/SwaggerModels.vue')),
+  'OfficelineDocument': defineAsyncComponent(() => import('@/views/settings/OfficelineDocument.vue')),
+  'ApiInfo': defineAsyncComponent(() => import('@/views/api/index.vue')),
 }
 
 const state = reactive({
@@ -267,7 +260,7 @@ function initKnife4jSpringUi() {
     //console.log(settings)
     //重新赋值是否开启增强
     if (!settings.enableSwaggerBootstrapUi) {
-      settings.enableSwaggerBootstrapUi = this.getPlusStatus();
+      settings.enableSwaggerBootstrapUi = getPlusStatus();
     }
     settings.language = tmpI18n;
     localStore.setItem(constant.globalSettingsKey, settings);
@@ -412,7 +405,6 @@ function initI18n() {
 
 onMounted(() => {
   const appReleaseType = import.meta.env.VITE_RELEASE_APP_TYPE
-  console.log("appReleaseType:" + appReleaseType);
   switch (appReleaseType) {
     case 'SpringDocOpenApi':
       initSpringDocOpenApi()
@@ -486,7 +478,7 @@ function getCacheGitVersion(gitVal) {
 }
 
 const handleMenuClick = (item) => {
-  console.log(item)
+  // 预留的菜单点击回调
 }
 const currentUser = computed(() => {
   return headersStore.userCurrent;

@@ -196,6 +196,123 @@ const utils = {
       return "#/components/schemas/(.*)$";
     }
   },
+  /**
+   * 判断对象是否为一个引用对象
+   * @param {*} obj 待判断对象
+   */
+  isRef(obj) {
+    return this.checkUndefined(obj) && this.strNotBlank(obj['$ref']);
+  },
+  /**
+   * 获取引用名称（引用地址的最后一段），如 #/components/schemas/User -> User
+   * @param {*} ref 引用地址
+   */
+  getRefName(ref) {
+    if (!this.strNotBlank(ref)) {
+      return '';
+    }
+    var segments = ref.split('/');
+    var name = segments[segments.length - 1] || '';
+    return decodeURIComponent(name.replace(/~1/g, '/').replace(/~0/g, '~'));
+  },
+  /**
+   * 解析文档内部的JSON Pointer引用
+   * @param {*} ref 引用地址，仅支持文档内部引用（#/开头）
+   * @param {*} root 文档根节点
+   */
+  resolveRef(ref, root) {
+    if (!this.strNotBlank(ref) || !this.checkUndefined(root) || !ref.startsWith('#/')) {
+      return null;
+    }
+    var paths = ref.substring(2).split('/');
+    var current = root;
+    for (var i = 0; i < paths.length; i++) {
+      if (!this.checkUndefined(current) || typeof current != 'object') {
+        return null;
+      }
+      var key = decodeURIComponent(paths[i].replace(/~1/g, '/').replace(/~0/g, '~'));
+      current = current[key];
+    }
+    return this.checkUndefined(current) ? current : null;
+  },
+  /**
+   * 将OAS3中allOf/oneOf/anyOf组合schema归一化，便于逐个解析属性
+   * 返回的结构：{ type, format, description, required, properties, items, schema }
+   * @param {*} schema 原始schema
+   * @param {*} root 文档根节点，用于解析$ref
+   * @param {*} depth 当前递归深度，避免循环引用
+   */
+  normalizeSchema(schema, root, depth) {
+    var dft = depth == null ? 0 : depth;
+    if (!this.checkUndefined(schema) || typeof schema != 'object' || dft > 8) {
+      return { type: '', format: '', description: '', required: [], properties: null, items: null, schema: null };
+    }
+    // $ref直接引用时先展开
+    if (this.isRef(schema) && this.checkUndefined(root)) {
+      var target = this.resolveRef(schema['$ref'], root);
+      if (this.checkUndefined(target)) {
+        schema = target;
+      }
+    }
+    var result = {
+      type: this.propValue('type', schema, ''),
+      format: this.propValue('format', schema, ''),
+      description: this.propValue('description', schema, ''),
+      required: this.propValue('required', schema, null) || [],
+      properties: this.propValue('properties', schema, null),
+      items: this.propValue('items', schema, null),
+      schema: schema
+    };
+    // 3.1支持type为数组，形如 ["string", "null"]
+    if (Array.isArray(result.type)) {
+      var types = result.type.filter(t => t != 'null');
+      result.type = types.length > 0 ? types[0] : 'string';
+    }
+    ['allOf', 'oneOf', 'anyOf'].forEach(group => {
+      var list = this.propValue(group, schema, null);
+      if (!Array.isArray(list) || list.length == 0) {
+        return;
+      }
+      var mergedProperties = {};
+      var mergedRequired = [];
+      var mergedType = result.type;
+      var mergedFormat = result.format;
+      list.forEach(item => {
+        var sub = this.normalizeSchema(item, root, dft + 1);
+        if (!this.strNotBlank(mergedType) && this.strNotBlank(sub.type)) {
+          mergedType = sub.type;
+        }
+        if (!this.strNotBlank(mergedFormat) && this.strNotBlank(sub.format)) {
+          mergedFormat = sub.format;
+        }
+        if (this.checkUndefined(sub.properties)) {
+          mergedProperties = Object.assign(mergedProperties, sub.properties);
+        }
+        if (Array.isArray(sub.required)) {
+          mergedRequired = mergedRequired.concat(sub.required);
+        }
+        if (!this.checkUndefined(result.items) && this.checkUndefined(sub.items)) {
+          result.items = sub.items;
+        }
+      });
+      if (Object.keys(mergedProperties).length > 0) {
+        result.properties = Object.assign(mergedProperties, result.properties || {});
+      }
+      if (mergedRequired.length > 0) {
+        result.required = Array.from(new Set((result.required || []).concat(mergedRequired)));
+      }
+      result.type = mergedType;
+      result.format = mergedFormat;
+    });
+    if (!this.strNotBlank(result.type)) {
+      if (this.checkUndefined(result.properties)) {
+        result.type = 'object';
+      } else if (this.checkUndefined(result.items)) {
+        result.type = 'array';
+      }
+    }
+    return result;
+  },
   filterIgnoreParameters(inType, name, ignoreParameters) {
     // 是否过滤参数
     if (ignoreParameters == null) {
@@ -633,7 +750,10 @@ const utils = {
     var basicTypes = ["string", "integer", "number", "object", "boolean", "int32", "int64", "float", "double"];
     var flag = false;
     if (type != null) {
-      if (basicTypes.indexOf(type) > -1) {
+      // 解析阶段会为类型追加format后缀（如 string(date-time)、integer(int64)），
+      // 此类类型本质上仍是基础类型，不能当作引用模型去展开
+      var normalized = String(type).trim().replace(/^([^\s(]+)\s*\(.*\)$/, '$1');
+      if (basicTypes.indexOf(normalized) > -1) {
         flag = true;
       }
     }
@@ -800,10 +920,39 @@ const utils = {
     return result;
   },
   checkExtensionsUndefined: function (obj) {
-    return obj && (this.checkUndefined(obj['extensions']) || this.checkUndefined(obj['x-extensions']))
+    return obj && (this.checkUndefined(obj['extensions']) || this.checkUndefined(obj['x-extensions']) || this.hasVendorExtensions(obj))
   },
+  /**
+   * 判断对象上是否直接平铺了以x-开头的扩展属性
+   * @param {*} obj
+   */
+  hasVendorExtensions: function (obj) {
+    if (!this.checkUndefined(obj) || typeof obj != 'object') {
+      return false;
+    }
+    return Object.keys(obj).some(function (key) {
+      return key.indexOf('x-') === 0 && key != 'x-extensions';
+    });
+  },
+  /**
+   * 读取扩展属性，兼容OAS3平铺的x-*属性与服务端包装的extensions节点
+   * @param {*} obj
+   */
   getExtensions: function (obj) {
-    return this.checkExtensionsUndefined(obj) ? (obj['extensions'] || obj['x-extensions']) : undefined
+    if (!this.checkUndefined(obj) || typeof obj != 'object') {
+      return undefined;
+    }
+    var merged = {};
+    var wrapped = obj['extensions'] || obj['x-extensions'];
+    if (this.checkUndefined(wrapped) && typeof wrapped == 'object') {
+      Object.assign(merged, wrapped);
+    }
+    Object.keys(obj).forEach(function (key) {
+      if (key.indexOf('x-') === 0 && key != 'x-extensions' && !merged.hasOwnProperty(key)) {
+        merged[key] = obj[key];
+      }
+    });
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 }
 
