@@ -6,8 +6,25 @@ import { AntDesignVueResolver } from 'unplugin-vue-components/resolvers'
 import { compression } from 'vite-plugin-compression2'
 import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import { fileURLToPath, URL } from 'node:url'
+import { cpSync, existsSync, mkdirSync } from 'node:fs'
 
 const srcDir = fileURLToPath(new URL('./src', import.meta.url))
+
+// public/oauth 会被原样拷贝到dist/oauth,这里再复制一份到dist/webjars/oauth,
+// 与knife4j后端只打包webjars目录的约定保持一致,保证OAuth2回调页oauth2.html可访问
+const copyOAuth2Plugin = () => ({
+  name: 'knife4j-copy-oauth2',
+  apply: 'build',
+  closeBundle() {
+    const from = fileURLToPath(new URL('./public/oauth', import.meta.url))
+    const to = fileURLToPath(new URL('./dist/webjars/oauth', import.meta.url))
+    if (!existsSync(from)) {
+      return
+    }
+    mkdirSync(to, { recursive: true })
+    cpSync(from, to, { recursive: true })
+  }
+})
 
 // 将体积较大的第三方依赖拆分成独立chunk，避免单个文件过大，同时提升浏览器缓存命中率
 // 注意：这里只做"按库归组"，不再兜底到统一的 vendor chunk。
@@ -43,7 +60,8 @@ export default defineConfig({
       algorithms: ['gzip'],
       threshold: 10240,
       deleteOriginalAssets: false
-    })
+    }),
+    copyOAuth2Plugin()
   ],
   resolve: {
     alias: [

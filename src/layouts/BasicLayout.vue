@@ -36,7 +36,8 @@
         <a-tabs hideAdd v-model:activeKey="state.activeKey" @contextmenu="e => onContextmenu(e)" type="editable-card"
                 @change="tabChange" @edit="tabEditCallback" class="knife4j-tab">
           <a-tab-pane v-for="pane in state.panels" :key="pane.key" :tab="pane.title" :closable="pane.closable">
-            <component :is="componentMap[pane.content]" :data="pane" @childrenMethods="childrenEmitMethod">
+            <component :is="componentMap[pane.content]" :key="pane.key + '-' + state.langVersion" :data="pane"
+                       @childrenMethods="childrenEmitMethod">
             </component>
           </a-tab-pane>
         </a-tabs>
@@ -97,6 +98,8 @@ const state = reactive({
   openKeys: [],
   selectedKeys: [],
   status: false,
+  // 语言版本号,变化后强制重建页签内的组件,保证切换语言后全部按新语言渲染
+  langVersion: 0,
   menuVisible: false,
   nextUrl: '',
   nextKey: '',
@@ -434,23 +437,77 @@ onMounted(() => {
   }
 })
 
+// 切换语言时需要同步更新的菜单项,i18n 标记为other的是自定义文档目录,其余菜单名称与语言无关
+const i18nMenuKeys = ['home', 'manager', 'globalsettings', 'officeline', 'selfSettings'];
+
+function updateMenuI18nItem(item, inst) {
+  if (!KUtils.checkUndefined(item.i18n) || i18nMenuKeys.indexOf(item.i18n) == -1) {
+    return;
+  }
+  const name = inst.menu[item.i18n];
+  if (KUtils.strNotBlank(name)) {
+    item.name = name;
+    // 文档管理下的页签标题形如:全局参数设置(分组名称)
+    if (KUtils.strNotBlank(item.tabName) && KUtils.strNotBlank(item.groupName)) {
+      item.tabName = name + '(' + item.groupName + ')';
+    }
+  }
+}
+
 function updateMenuI18n() {
   //根据i18n的切换,更新菜单的显示
-  //console.log("根据i18n的切换,更新菜单的显示")
-  if (KUtils.arrNotEmpty(state.MenuData)) {
-    state.MenuData.forEach(m => {
-      if (KUtils.checkUndefined(m.i18n)) {
-        m.name = getCurrentI18nInstance().menu[m.i18n];
-        if (KUtils.arrNotEmpty(m.children)) {
-          m.children.forEach(cm => {
-            if (KUtils.checkUndefined(cm.i18n)) {
-              cm.name = getCurrentI18nInstance().menu[cm.i18n];
-            }
-          })
-        }
-      }
-    })
+  const inst = getCurrentI18nInstance();
+  if (!inst || !inst.menu) {
+    return;
   }
+  const menuData = globalsStore.currentMenuData || [];
+  menuData.forEach(m => {
+    updateMenuI18nItem(m, inst);
+    if (KUtils.arrNotEmpty(m.children)) {
+      m.children.forEach(cm => updateMenuI18nItem(cm, inst));
+    }
+  })
+}
+
+/**
+ * 更新已打开页签的标题(页签标题是打开时的快照,不会随i18n自动变化)
+ */
+function updatePanelTitles() {
+  const inst = getCurrentI18nInstance();
+  if (!inst || !inst.menu) {
+    return;
+  }
+  state.panels.forEach(panel => {
+    if (panel.key == 'kmain') {
+      panel.title = inst.menu.home;
+      return;
+    }
+    const menu = findMenuByKey(panel.key, MenuData.value);
+    if (menu != null) {
+      panel.title = menu.tabName ? menu.tabName : menu.name;
+    }
+  })
+}
+
+/**
+ * 语言切换后同步刷新当前页面的所有内容
+ * 1.顶部菜单项、左侧导航的菜单名称
+ * 2.已打开页签的标题
+ * 3.页签内的组件(部分组件在created中初始化了文本,需重新创建才能生效)
+ */
+function refreshLanguageView() {
+  initI18n();
+  // 搜索过滤后的菜单是快照数据,先恢复完整菜单再更新名称
+  state.localMenuData = globalsStore.currentMenuData;
+  updateMenuI18n();
+  updatePanelTitles();
+  // 重建前保证每个页签都有实例数据,避免后台页签组件重新创建时取不到实例
+  state.panels.forEach(panel => {
+    if (panel.instance == null) {
+      panel.instance = swaggerCurrentInstance.value;
+    }
+  });
+  state.langVersion = state.langVersion + 1;
 }
 
 function getCacheSettings(val) {
@@ -519,12 +576,13 @@ const searchClear = () => {
 }
 
 watch(() => language.value, () =>{
-  initI18n();
-  updateMenuI18n();
+  refreshLanguageView();
 })
 let hasInit = false
 watch(() => MenuData.value, () => {
   state.localMenuData = globalsStore.currentMenuData;
+  // 菜单可能复用的是其他语言下生成的快照数据,就绪后按当前语言校正一次
+  updateMenuI18n();
   // 菜单数据是接口异步加载的,数据就绪后需按当前路由同步菜单的选中与展开状态,
   // 否则刷新页面或通过URL直接访问时,左侧菜单不会激活对应菜单项
   syncMenuByRoute()
