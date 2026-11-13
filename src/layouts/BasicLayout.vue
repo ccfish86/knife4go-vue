@@ -54,13 +54,12 @@ import GlobalHeader from "@/components/GlobalHeader/index.vue";
 import GlobalFooter from "@/components/GlobalFooter/index.vue";
 import KUtils from "@/core/utils";
 import SwaggerBootstrapUi from "@/core/Knife4jAsync.js";
-import { findComponentsByPath, findMenuByKey } from "@/components/utils/Knife4jUtils";
-import { urlToList } from "@/components/utils/pathTools";
+import { findComponentsByPath, findMenuByKey, findOpenKeysByPath } from "@/components/utils/Knife4jUtils";
 import ThreeMenu from "@/components/SiderMenu/ThreeMenu.vue";
 //右键菜单
 import ContextMenu from "@/components/common/ContextMenu.vue";
 import constant from "@/store/constants";
-import { computed, defineAsyncComponent, onUpdated, reactive, watch, onMounted } from 'vue'
+import { computed, defineAsyncComponent, onUpdated, reactive, watch, onMounted, nextTick } from 'vue'
 import { useGlobalsStore } from '@/store/modules/global.js'
 import { useHeadersStore } from '@/store/modules/header.js'
 import { useRoute, useRouter } from 'vue-router'
@@ -424,6 +423,15 @@ onMounted(() => {
   }
 
   initI18n()
+  // 菜单数据在挂载前已就绪的场景(如组件重新挂载),同样需要根据当前URL同步菜单选中状态
+  if (KUtils.arrNotEmpty(MenuData.value) && swagger.value) {
+    state.localMenuData = MenuData.value
+    syncMenuByRoute()
+    if (!hasInit) {
+      openDefaultTabByPath()
+      hasInit = true
+    }
+  }
 })
 
 function updateMenuI18n() {
@@ -517,6 +525,9 @@ watch(() => language.value, () =>{
 let hasInit = false
 watch(() => MenuData.value, () => {
   state.localMenuData = globalsStore.currentMenuData;
+  // 菜单数据是接口异步加载的,数据就绪后需按当前路由同步菜单的选中与展开状态,
+  // 否则刷新页面或通过URL直接访问时,左侧菜单不会激活对应菜单项
+  syncMenuByRoute()
   if(!hasInit) {
     openDefaultTabByPath()
     hasInit = true
@@ -789,37 +800,24 @@ function updateMainTabInstance() {
   });
 }
 
+function syncMenuByRoute() {
+  // 等待菜单项渲染完成后再设置选中/展开状态
+  nextTick(() => {
+    watchPathMenuSelect()
+  })
+}
+
 function watchPathMenuSelect() {
-  let parentM
   const url = route.path
-  const tmpcol = state.collapsed;
-  //console.log("watch-------------------------");
-  const pathArr = urlToList(url);
-  //console.log(pathArr);
-  //console.log(this.MenuData)
   const m = findComponentsByPath(url, MenuData.value)
-  //console.log(m);
-  //如果菜单面板已折叠,则不用打开openKeys
-  if (!tmpcol) {
-    if (pathArr.length == 2) {
-      //二级子菜单
-      parentM = findComponentsByPath(pathArr[0], MenuData.value)
-      if (parentM != null) {
-        state.openKeys = [parentM.key];
-      }
-    } else if (pathArr.length == 3) {
-      //三级子菜单
-      parentM = findComponentsByPath(pathArr[1], MenuData.value)
-      if (parentM != null) {
-        state.openKeys = [parentM.key];
-      }
-    } else {
-      if (m != null) {
-        state.openKeys = [m.key];
-      }
+  // 如果菜单面板已折叠,则不用打开openKeys
+  if (!state.collapsed) {
+    // 根据当前路由在菜单树中的父级链路展开对应分组
+    const openKeys = findOpenKeysByPath(url, MenuData.value)
+    if (openKeys !== null) {
+      state.openKeys = openKeys
     }
   }
-
   //this.selectedKeys = [this.location.path];
   if (m != null) {
     state.selectedKeys = [m.key];
@@ -828,21 +826,8 @@ function watchPathMenuSelect() {
 }
 
 function selectDefaultMenu() {
-  const url = route.path
-  const pathArr = urlToList(url);
-  const m = findComponentsByPath(url, MenuData.value)
-  if (pathArr.length == 2) {
-    //二级子菜单
-    const parentM = findComponentsByPath(pathArr[0], MenuData.value)
-    if (parentM != null) {
-      state.openKeys = [parentM.key];
-    }
-  } else {
-    //this.selectedKeys = [this.location.path];
-    if (m != undefined && m != null) {
-      state.selectedKeys = [m.key];
-    }
-  }
+  // 菜单折叠状态变化后,根据当前路由重新同步选中项与展开项
+  watchPathMenuSelect()
 }
 
 function menuClick(key) {
