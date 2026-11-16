@@ -537,6 +537,9 @@ const langOptions = {
   script: {
     JSExample: 'JS模板示例',
     TSExample: 'TS模板示例',
+    queryMode: '参数拼接方式',
+    axiosTip: 'Axios 模式会把 query 参数交给 axios 序列化（自动忽略空值）；数组参数需要在 axios 实例上配置 paramsSerializer.indexes = null，否则会序列化成 ids[]=1',
+    multipartTip: 'multipart/form-data 接口已自动使用 FormData 提交字段，并指定 Content-Type 请求头，无需切换参数拼接方式',
   }
 }
 

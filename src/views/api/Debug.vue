@@ -315,6 +315,9 @@ export default {
     const enableReloadCacheParameter = computed(() => {
       return globalsStore.enableReloadCacheParameter;
     })
+    const swagger = computed(() => {
+      return globalsStore.swagger;
+    })
 
     const knife4jModels = useknife4jModels()
     const { messages } = useI18n()
@@ -322,9 +325,10 @@ export default {
       language,
       enableAfterScript,
       enableReloadCacheParameter,
+      swagger,
       knife4jModels,
       messages
-    }
+    };
   },
   data() {
     return {
@@ -430,6 +434,12 @@ export default {
     };
   },
   created() {
+    // 文档页的接口二次解析已延后到空闲时段执行,用户若在解析完成前直接切到调试页,
+    // 这里同步补齐一次,保证调试参数完整
+    if (this.api != null && this.api != undefined && !this.api.init &&
+      this.swagger != null && typeof this.swagger.initApiInfoAsync === 'function') {
+      this.swagger.initApiInfoAsync(this.api);
+    }
     this.routeHeader = this.swaggerInstance.header;
     this.oas2 = this.swaggerInstance.oas2();
     this.initI18n();

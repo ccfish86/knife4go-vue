@@ -510,17 +510,17 @@ const utils = {
     });
   },
   md5Id: function (obj) {
+    // 接口版本指纹:直接对序列化结果取md5。
+    // 早期实现会把字符串拆成字符数组再排序(split+sort+join),复杂度O(n log n),
+    // 在分组文档解析时对每个接口都执行一次,是首屏耗时的主要来源之一;
+    // 同一份文档的字段顺序是稳定的,直接取md5即可满足"内容是否变更"的判断。
     var md5Id = "";
     try {
       if (obj != null && obj != undefined) {
         var str = JSON.stringify(obj);
         if (str != "") {
-          var strArr = str.split("");
-          strArr.sort();
-          var newStr = strArr.join("");
-          md5Id = md5(newStr);
+          md5Id = md5(str);
         }
-
       }
     } catch (err) { }
     return md5Id;
@@ -579,14 +579,25 @@ const utils = {
 
   },
   json5parse: function (rtext) {
-    var ret = null;
-    try {
-      ret = JSON5.parse(rtext)
-    } catch (err) {
-      // console(err)
-      ret = JSON.parse(rtext);
+    // 文档接口返回的是标准JSON,优先用原生JSON.parse(比JSON5解析器快一个数量级),
+    // 仅在遇到注释、单引号、尾逗号等非标准写法时才回退到JSON5解析
+    if (typeof rtext !== 'string') {
+      return rtext;
     }
-    return ret;
+    var text = rtext.trim();
+    if (text == '') {
+      return null;
+    }
+    // 收到HTML说明请求地址不对(404页面、前端路由回退、网关错误页等),
+    // 这里直接抛出可读的错误信息,避免JSON5抛"Unexpected '<'"这类难以定位的语法错误
+    if (text.charAt(0) == '<') {
+      throw new Error('响应内容不是JSON而是HTML页面,请检查文档接口地址是否正确(响应片段: ' + text.substring(0, 60) + ')');
+    }
+    try {
+      return JSON.parse(rtext);
+    } catch (err) {
+      return JSON5.parse(rtext);
+    }
   },
   filterJsonObject: function (prefix, originalJson, filterObject) {
     var _tmpValue = null;

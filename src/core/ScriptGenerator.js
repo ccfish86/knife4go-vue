@@ -211,6 +211,42 @@ function getResParams(resParams, resRefParams, refStack) {
 }
 
 /**
+ * 判断参数是否为文件类型
+ * OAS2使用file/MultipartFile,OAS3使用binary格式
+ * @param {object} parameter
+ */
+export function isFileParam(parameter) {
+  if (!parameter) {
+    return false;
+  }
+  const rawType = `${parameter.type || ''} ${parameter.schemaValue || ''}`.toLowerCase();
+  return rawType.indexOf('multipartfile') > -1
+    || rawType.indexOf('file') > -1
+    || rawType.indexOf('binary') > -1;
+}
+
+/**
+ * 判断接口是否为multipart/form-data请求
+ * 解析阶段会给multipart接口设置contentType=multipart/form-data、contentValue=form-data,
+ * 部分场景只能通过参数类型(MultipartFile/file)识别
+ * @param {object} api
+ */
+export function isMultipartRequest(api) {
+  if (!api) {
+    return false;
+  }
+  const contentType = String(api.contentType || '').toLowerCase();
+  if (contentType.indexOf('multipart/form-data') > -1 || api.contentValue === 'form-data') {
+    return true;
+  }
+  const consumes = Array.isArray(api.consumes) ? api.consumes : [];
+  if (consumes.some(consume => String(consume).toLowerCase().indexOf('multipart/form-data') > -1)) {
+    return true;
+  }
+  return Array.isArray(api.parameters) && api.parameters.some(parameter => isFileParam(parameter));
+}
+
+/**
  * 获取函数配置
  * @param {obj} api
  * @returns
@@ -221,6 +257,8 @@ export function formatApi(api) {
   const rawName = api.operationId
     ? String(api.operationId).split('Using')[0]
     : `${api.methodType || 'api'}${api.url || ''}`;
+  // multipart/form-data必须用FormData提交,不能拼query
+  const multipart = isMultipartRequest(api);
   const config = {
     name: toIdentifierName(rawName, 'api'), // 函数名称
     method: String(api.methodType || 'get').toLowerCase(), // http方法;
@@ -228,35 +266,49 @@ export function formatApi(api) {
     pathParams: [], // path请求参数
     queryParams: [], // query请求参数
     bodyParams: [], // body请求参数
+    formParams: [], // multipart表单字段
+    isMultipart: multipart, // 是否multipart/form-data请求
+    contentType: multipart ? 'multipart/form-data' : (api.contentType || 'application/json'), // 请求数据类型
     resParam: {}, // res响应参数
   };
   if(Array.isArray(api.parameters)) {
     api.parameters.map(p => {
-      switch(p.in) {
-        case 'path':
-          config.pathParams.push({
-            name: p.name,
-            varName: toIdentifierName(p.name, 'id'),
-            type: getBaseType(p.type),
-            in: 'path'
-          });
-          break;
-        case 'query':
-          config.queryParams.push({
-            name: p.name,
-            varName: toIdentifierName(p.name, 'query'),
-            type:  getBaseType(p.type),
-            in: 'query'
-          });
-          break;
-        default:
-          config.bodyParams.push({
-            name: 'params',
-            type:  p.type === 'array' ? 'array' : 'object',
-            children: p.children
-          });
-          break;
+      if (p.in === 'path') {
+        config.pathParams.push({
+          name: p.name,
+          varName: toIdentifierName(p.name, 'id'),
+          type: getBaseType(p.type),
+          in: 'path'
+        });
+        return;
       }
+      if (multipart) {
+        // OAS3解析后表单字段的in会被改写为query,OAS2为formData;文件字段统一走表单
+        if (p.in === 'query' || p.in === 'formData' || p.in === 'body') {
+          config.formParams.push({
+            name: p.name,
+            varName: toIdentifierName(p.name, 'field'),
+            type: getBaseType(p.type),
+            rawType: p.type,
+            isFile: isFileParam(p)
+          });
+        }
+        return;
+      }
+      if (p.in === 'query') {
+        config.queryParams.push({
+          name: p.name,
+          varName: toIdentifierName(p.name, 'query'),
+          type:  getBaseType(p.type),
+          in: 'query'
+        });
+        return;
+      }
+      config.bodyParams.push({
+        name: 'params',
+        type:  p.type === 'array' ? 'array' : 'object',
+        children: p.children
+      });
     })
   }
   if(Array.isArray(api.responseCodes)) {
@@ -492,6 +544,10 @@ export function getComment(api) {
     if(parameter.in === 'query') {
       common += ` * @param {string} params.${parameter.name} ${parameter.description}\n `
     }
+    if(parameter.in === 'formData') {
+      // multipart表单字段:文件类型标注file,其余按基础类型
+      common += ` * @param {${isFileParam(parameter) ? 'file' : getBaseType(parameter.type)}} params.${parameter.name} ${parameter.description}\n `
+    }
     if(parameter.in === 'body') {
       const bodyType = parameter.type === 'array' ? 'array' : 'object';
       const hasChildren = Array.isArray(parameter.children) && parameter.children.length > 0;
@@ -543,11 +599,10 @@ export function getTypeAnnotation (param) {
 }
 
 /**
- * 将path/query参数转换为对象解构属性
- * 键保持接口原始参数名(如'user-tags')，变量名使用合法标识符(user_tags)
+ * 将参数转换为同名对象属性，名称合法且未改名时使用简写
  * @param {array} params
  */
-function getObjectPatternProperties(params) {
+function getObjectProperties(params) {
   return params.map(param => {
     const key = getPropertyKey(param.name);
     const value = t.identifier(getParamVariable(param));
@@ -556,6 +611,27 @@ function getObjectPatternProperties(params) {
     prop.shorthand = key.type === 'Identifier' && key.name === value.name;
     return prop;
   })
+}
+
+/**
+ * 将path/query参数转换为对象解构属性
+ * 键保持接口原始参数名(如'user-tags')，变量名使用合法标识符(user_tags)
+ * @param {array} params
+ */
+function getObjectPatternProperties(params) {
+  return getObjectProperties(params);
+}
+
+/**
+ * 构建axios请求配置对象: { params: { page, ids } }
+ * axios会自行序列化query参数(null/undefined会被忽略),
+ * 数组需要在axios实例配置 paramsSerializer.indexes = null,否则会序列化成ids[]=1
+ * @param {array} queryParams
+ */
+function getAxiosConfigExpression(queryParams) {
+  return t.objectExpression([
+    t.objectProperty(t.identifier('params'), t.objectExpression(getObjectProperties(queryParams)))
+  ]);
 }
 
 /**
@@ -571,11 +647,122 @@ function getBodyParamName(inputParams) {
 }
 
 /**
+ * 获取FormData变量名
+ * 与解构出来的字段变量重名时需要避让,否则会重复声明
+ * @param {array} fields
+ */
+function getFormDataName(fields) {
+  const usedNames = fields.map(field => getParamVariable(field));
+  let formDataName = 'formData';
+  while (usedNames.indexOf(formDataName) > -1) {
+    formDataName = '_' + formDataName;
+  }
+  return formDataName;
+}
+
+/**
+ * 生成formData.append语句
+ * FormData只接受string/Blob,基础类型需转字符串,对象转JSON字符串,文件类型直接append
+ * @param {string} formDataName
+ * @param {object} param
+ */
+function getFormAppendStatements(formDataName, param) {
+  const varId = t.identifier(getParamVariable(param));
+  // 箭头函数体需要表达式,语句则在外层加expressionStatement
+  const appendExpression = value => t.callExpression(
+    t.memberExpression(t.identifier(formDataName), t.identifier('append')),
+    [t.stringLiteral(param.name), value]
+  );
+  const appendStatement = value => t.expressionStatement(appendExpression(value));
+  if (param.type === 'array') {
+    // 数组字段(如多文件)按同名key重复append
+    const values = t.conditionalExpression(
+      t.callExpression(t.memberExpression(t.identifier('Array'), t.identifier('isArray')), [varId]),
+      varId,
+      t.arrayExpression([varId])
+    );
+    const filtered = t.callExpression(
+      t.memberExpression(values, t.identifier('filter')),
+      [t.arrowFunctionExpression([t.identifier('v')], t.binaryExpression('!=', t.identifier('v'), t.nullLiteral()))]
+    );
+    const itemValue = param.isFile ? t.identifier('v') : t.callExpression(t.identifier('String'), [t.identifier('v')]);
+    return [t.expressionStatement(t.callExpression(
+      t.memberExpression(filtered, t.identifier('forEach')),
+      [t.arrowFunctionExpression([t.identifier('v')], appendExpression(itemValue))]
+    ))];
+  }
+  if (param.isFile) {
+    return [appendStatement(varId)];
+  }
+  if (param.type === 'object') {
+    // 表单里的复杂对象按JSON字符串提交
+    return [appendStatement(t.callExpression(
+      t.memberExpression(t.identifier('JSON'), t.identifier('stringify')),
+      [varId]
+    ))];
+  }
+  return [appendStatement(t.callExpression(t.identifier('String'), [varId]))];
+}
+
+/**
+ * 构建multipart/form-data请求参数
+ * multipart不能使用URLSearchParams,需要用FormData拼装字段并指定Content-Type
+ * @param {object} api
+ * @param {array} funParams 函数参数
+ * @param {array} requestParams 请求参数
+ * @param {array} statements 函数体语句
+ * @param {boolean} withTypeAnnotation 是否生成TS类型注解
+ */
+function buildMultipartRequest(api, funParams, requestParams, statements, withTypeAnnotation) {
+  const { url, pathParams, queryParams, formParams } = api;
+  const fields = [].concat(pathParams, queryParams || [], formParams || []);
+  // path/query/form字段合并为一个对象参数
+  if (fields.length > 0) {
+    const pattern = t.objectPattern(getObjectPatternProperties(fields));
+    if (withTypeAnnotation) {
+      pattern.typeAnnotation = t.tsTypeAnnotation(t.tsTypeLiteral(
+        fields.map(param => t.tsPropertySignature(
+          getPropertyKey(param.name),
+          t.tsTypeAnnotation(getTypeAnnotationNode(param)),
+          // path参数必填,query/form字段按可选处理
+          param.in !== 'path'
+        ))
+      ));
+    }
+    funParams.push(pattern);
+  }
+  // const formData = new FormData();
+  const formDataName = getFormDataName(fields);
+  statements.push(t.variableDeclaration('const', [
+    t.variableDeclarator(
+      t.identifier(formDataName),
+      t.newExpression(t.identifier('FormData'), [])
+    )
+  ]));
+  // formData.append('file', file)
+  (formParams || []).forEach(param => {
+    statements.push(...getFormAppendStatements(formDataName, param));
+  });
+  // request.post(`/common/upload/image`, formData, { headers: {...} })
+  requestParams.push(getTemplateUrl(getUrls(url), pathParams, null));
+  requestParams.push(t.identifier(formDataName));
+  const configProps = [];
+  if (queryParams && queryParams.length > 0) {
+    configProps.push(t.objectProperty(t.identifier('params'), t.objectExpression(getObjectProperties(queryParams))));
+  }
+  configProps.push(t.objectProperty(t.identifier('headers'), t.objectExpression([
+    t.objectProperty(t.stringLiteral('Content-Type'), t.stringLiteral('multipart/form-data'))
+  ])));
+  requestParams.push(t.objectExpression(configProps));
+}
+
+/**
  * js函数构造器
  * @param {object} api
+ * @param {object} options queryMode: axios(默认,交给axios序列化query) | urlsearchparams(手动拼接)
  * @returns
  */
-export function getJsFunctionDeclaration(api) {
+export function getJsFunctionDeclaration(api, options) {
   const {
     name,
     method,
@@ -584,28 +771,44 @@ export function getJsFunctionDeclaration(api) {
     queryParams,
     bodyParams,
   } = api;
+  const opts = options || {};
+  // 默认把query交给axios的params参数,传queryMode='urlsearchparams'时改为手动拼接
+  const useAxiosParams = opts.queryMode !== 'urlsearchparams';
 
   const funParams = [];
   const requestParams = [];
-  const inputParams = [].concat(pathParams, queryParams);
-  // query参数由URLSearchParams拼接,避免数组参数被拼成ids=1,2
-  const queryInfo = getQueryStatements(queryParams, inputParams.map(param => getParamVariable(param)));
-  // 构建request请求的路径参数
-  requestParams.push(getTemplateUrl(getUrls(url), pathParams, queryInfo.expr));
-  // path/query参数合并为一个对象参数{ id, page },避免参数名和顺序被固定
-  if (inputParams.length > 0) {
-    funParams.push(t.objectPattern(getObjectPatternProperties(inputParams)));
+  const statements = [];
+  if (api.isMultipart) {
+    // multipart/form-data必须用FormData+Content-Type提交,不能使用URLSearchParams
+    buildMultipartRequest(api, funParams, requestParams, statements, false);
+  } else {
+    const inputParams = [].concat(pathParams, queryParams);
+    // axios模式:query由axios序列化;URLSearchParams模式:避免数组参数被拼成ids=1,2
+    const queryInfo = useAxiosParams
+      ? { statements: [], expr: null }
+      : getQueryStatements(queryParams, inputParams.map(param => getParamVariable(param)));
+    statements.push(...queryInfo.statements);
+    // 构建request请求的路径参数
+    requestParams.push(getTemplateUrl(getUrls(url), pathParams, queryInfo.expr));
+    // path/query参数合并为一个对象参数{ id, page },避免参数名和顺序被固定
+    if (inputParams.length > 0) {
+      funParams.push(t.objectPattern(getObjectPatternProperties(inputParams)));
+    }
+    const bodyName = getBodyParamName(inputParams);
+    bodyParams.map(() => {
+      const temp = t.identifier(bodyName);
+      funParams.push(temp);
+      requestParams.push(temp);
+    })
+    // axios模式:query参数作为请求config的params字段传入
+    if (useAxiosParams && queryParams.length > 0) {
+      requestParams.push(getAxiosConfigExpression(queryParams));
+    }
   }
-  const bodyName = getBodyParamName(inputParams);
-  bodyParams.map(() => {
-    const temp = t.identifier(bodyName);
-    funParams.push(temp);
-    requestParams.push(temp);
-  })
   const declaration = t.functionDeclaration(
     t.identifier(name),
     funParams,
-    t.blockStatement([].concat(queryInfo.statements, [
+    t.blockStatement([].concat(statements, [
       t.returnStatement(
         t.callExpression( // 方法调用
           t.memberExpression(
@@ -647,9 +850,10 @@ export function getTsInterfaceDeclaration(prop, interfaceName, openOptional) {
  * ts函数构造器
  * @param {object} api
  * @param {string} interfaceName
+ * @param {object} options queryMode: axios(默认,交给axios序列化query) | urlsearchparams(手动拼接)
  * @returns
  */
- export function getTsFunctionDeclaration(api, interfaceName) {
+ export function getTsFunctionDeclaration(api, interfaceName, options) {
   const {
     name,
     method,
@@ -659,38 +863,54 @@ export function getTsInterfaceDeclaration(prop, interfaceName, openOptional) {
     bodyParams,
     resParam,
   } = api;
+  const opts = options || {};
+  // 默认把query交给axios的params参数,传queryMode='urlsearchparams'时改为手动拼接
+  const useAxiosParams = opts.queryMode !== 'urlsearchparams';
 
   const funParams = [];
   const requestParams = [];
-  const inputParams = [].concat(pathParams, queryParams);
-  // query参数由URLSearchParams拼接,避免数组参数被拼成ids=1,2
-  const queryInfo = getQueryStatements(queryParams, inputParams.map(param => getParamVariable(param)));
-  // 构建request请求的路径参数
-  requestParams.push(getTemplateUrl(getUrls(url), pathParams, queryInfo.expr));
-  // path/query参数合并为一个对象参数: ({ id, page }: { id: string; page?: number })
-  if (inputParams.length > 0) {
-    const pattern = t.objectPattern(getObjectPatternProperties(inputParams));
-    pattern.typeAnnotation = t.tsTypeAnnotation(t.tsTypeLiteral(
-      inputParams.map(param => t.tsPropertySignature(
-        getPropertyKey(param.name),
-        t.tsTypeAnnotation(getTypeAnnotationNode(param)),
-        // path参数必填,query参数按可选处理
-        param.in !== 'path'
-      ))
-    ));
-    funParams.push(pattern);
+  const statements = [];
+  if (api.isMultipart) {
+    // multipart/form-data必须用FormData+Content-Type提交,不能使用URLSearchParams
+    buildMultipartRequest(api, funParams, requestParams, statements, true);
+  } else {
+    const inputParams = [].concat(pathParams, queryParams);
+    // axios模式:query由axios序列化;URLSearchParams模式:避免数组参数被拼成ids=1,2
+    const queryInfo = useAxiosParams
+      ? { statements: [], expr: null }
+      : getQueryStatements(queryParams, inputParams.map(param => getParamVariable(param)));
+    statements.push(...queryInfo.statements);
+    // 构建request请求的路径参数
+    requestParams.push(getTemplateUrl(getUrls(url), pathParams, queryInfo.expr));
+    // path/query参数合并为一个对象参数: ({ id, page }: { id: string; page?: number })
+    if (inputParams.length > 0) {
+      const pattern = t.objectPattern(getObjectPatternProperties(inputParams));
+      pattern.typeAnnotation = t.tsTypeAnnotation(t.tsTypeLiteral(
+        inputParams.map(param => t.tsPropertySignature(
+          getPropertyKey(param.name),
+          t.tsTypeAnnotation(getTypeAnnotationNode(param)),
+          // path参数必填,query参数按可选处理
+          param.in !== 'path'
+        ))
+      ));
+      funParams.push(pattern);
+    }
+    const bodyName = getBodyParamName(inputParams);
+    bodyParams.map(param => {
+      // 指定接口类型名称：数组请求体用any[]，对象请求体用自动生成的Params接口
+      const bodyType = param.type === 'array' ? 'array' : `${interfaceName}Params`;
+      funParams.push(getTypeAnnotation({ name: bodyName, type: bodyType }));
+      requestParams.push(t.identifier(bodyName));
+    })
+    // axios模式:query参数作为请求config的params字段传入
+    if (useAxiosParams && queryParams.length > 0) {
+      requestParams.push(getAxiosConfigExpression(queryParams));
+    }
   }
-  const bodyName = getBodyParamName(inputParams);
-  bodyParams.map(param => {
-    // 指定接口类型名称：数组请求体用any[]，对象请求体用自动生成的Params接口
-    const bodyType = param.type === 'array' ? 'array' : `${interfaceName}Params`;
-    funParams.push(getTypeAnnotation({ name: bodyName, type: bodyType }));
-    requestParams.push(t.identifier(bodyName));
-  })
   const declaration = t.functionDeclaration(
     t.identifier(name),
     funParams,
-    t.blockStatement([].concat(queryInfo.statements, [
+    t.blockStatement([].concat(statements, [
       t.returnStatement(
         t.callExpression( // 方法调用
           t.memberExpression(

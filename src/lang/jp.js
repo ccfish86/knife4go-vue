@@ -537,6 +537,9 @@ const langOptions = {
   script: {
     JSExample: 'JSテンプレートの例',
     TSExample: 'TSテンプレートの例',
+    queryMode: 'パラメータの連結方式',
+    axiosTip: 'Axios モードでは query パラメータを axios に委譲します（null/undefined は自動的に無視されます）。配列パラメータは axios インスタンスで paramsSerializer.indexes = null を設定してください。設定しない場合は ids[]=1 の形式になります',
+    multipartTip: 'multipart/form-data のリクエストは FormData で送信し、Content-Type ヘッダーを指定します。パラメータ連結方式の切り替えは適用されません',
   }
 }
 

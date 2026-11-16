@@ -546,6 +546,9 @@ const langOptions = {
   script: {
     JSExample: 'JSExample',
     TSExample: 'TSExample',
+    queryMode: 'Query Mode',
+    axiosTip: 'Axios mode passes query params to axios (null/undefined are ignored). For array params, set paramsSerializer.indexes = null on the axios instance, otherwise they are serialized as ids[]=1',
+    multipartTip: 'multipart/form-data requests are submitted with FormData fields and an explicit Content-Type header, so the query mode switch does not apply',
   }
 };
 

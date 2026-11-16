@@ -6,7 +6,7 @@
           <template #tab>
             <my-icon type="icon-wendang" /><span>{{ $t('doc.title') }}</span>
           </template>
-          <Document :api="api" :swaggerInstance="swaggerInstance" />
+          <Document :api="api" :swaggerInstance="swaggerInstance" :apiInitVersion="apiInitVersion" />
         </a-tab-pane>
         <a-tab-pane key="debug">
           <template #tab>
@@ -30,7 +30,7 @@
       </a-tabs>
     </a-row>
     <a-row class="knife4j-api-readonly" v-else style="display: block">
-      <Document :api="api" :swaggerInstance="swaggerInstance" />
+      <Document :api="api" :swaggerInstance="swaggerInstance" :apiInitVersion="apiInitVersion" />
     </a-row>
   </a-layout-content>
 </template>
@@ -63,7 +63,9 @@ export default {
     return {
       api: null,
       swaggerInstance: null,
-      debugSupport: false
+      debugSupport: false,
+      // 接口二次解析的完成版本号,变化后通知Document组件重新构建表格数据
+      apiInitVersion: 0
     };
   },
   setup() {
@@ -96,7 +98,11 @@ export default {
       }
     });
     if (!apiInfo.init) {
-      this.swagger.initApiInfoAsync(apiInfo);
+      // 接口的二次解析(参数树、响应示例)是纯CPU计算,放到首帧之后执行,
+      // 避免打开文档时白屏等待;解析完成后通过apiInitVersion通知Document重新计算
+      this.scheduleInitApiInfo(apiInfo, instance);
+    } else {
+      this.apiInitVersion = 1;
     }
     // console.log(apiInfo)
     this.storeCacheApiAddApiInfo(apiInfo, instance.groupId);
@@ -107,6 +113,37 @@ export default {
 
   },
   methods: {
+    /**
+     * 首帧渲染完成后再执行接口的二次解析
+     * 同时校验当前分组是否已切换,避免把上一个分组的数据解析到新分组上
+     */
+    scheduleInitApiInfo(apiInfo, instance) {
+      const run = () => {
+        try {
+          const swagger = this.swagger;
+          if (swagger != null && swagger != undefined && typeof swagger.initApiInfoAsync === 'function') {
+            const current = swagger.currentInstance;
+            if (current != null && current != undefined && current.id != instance.id) {
+              return;
+            }
+            if (!apiInfo.init) {
+              swagger.initApiInfoAsync(apiInfo);
+            }
+          }
+        } catch (e) {
+          if (window.console) {
+            window.console.error(e);
+          }
+        } finally {
+          this.apiInitVersion = this.apiInitVersion + 1;
+        }
+      };
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(run, { timeout: 500 });
+      } else {
+        setTimeout(run, 0);
+      }
+    },
     onTabChange(key, type) {
       // console(key, type);
       this[type] = key;

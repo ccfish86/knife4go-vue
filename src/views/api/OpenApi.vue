@@ -60,10 +60,14 @@ export default {
     const language = computed(() => {
       return store.language
     })
+    const swagger = computed(() => {
+      return store.swagger
+    })
 
     const { messages } = useI18n()
     return {
       language,
+      swagger,
       messages
     }
   },
@@ -74,7 +78,12 @@ export default {
     }
   },
   created() {
-    this.openApiRaw = KUtils.json5stringify(this.api.openApiRaw);
+    // 原始OpenAPI数据改为按需构建(解析阶段不再为每个接口预先生成),首次打开本页签时才计算并缓存
+    const swagger = this.swagger;
+    const openApiRaw = swagger != null && typeof swagger.buildApiOpenApiRaw === 'function'
+      ? swagger.buildApiOpenApiRaw(this.api, this.swaggerInstance)
+      : this.api.openApiRaw;
+    this.openApiRaw = KUtils.json5stringify(openApiRaw);
     this.name = this.api.summary + "_OpenAPI.json";
     // console.log(this.api);
     setTimeout(() => {

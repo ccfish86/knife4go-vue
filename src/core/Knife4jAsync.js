@@ -720,6 +720,12 @@ SwaggerBootstrapUi.prototype.analysisApi = function (instance) {
       if (that.settings.enableSwaggerBootstrapUi) {
         api = instance.extUrl;
       }
+      if (api == undefined || api == null || api == '') {
+        // 地址为空时不能直接发请求,否则会请求当前页面并拿到HTML
+        message.error('未获取到分组文档地址,请检查 swagger-config 接口的返回内容');
+        that.error('分组文档地址为空:' + instance.name);
+        return;
+      }
       // 这里判断url请求是否已加载过
       // 防止出现根路径的情况
       // 如果是springdoc-openapi,无需判断,因为springdoc-openapi会把basePath带上
@@ -729,39 +735,60 @@ SwaggerBootstrapUi.prototype.analysisApi = function (instance) {
           api = api.substr(1);
         }
       }
-      // 测试
-      // api = 'run.json';
-      // 此处加上transformResponse参数,防止Long类型在前端丢失精度
-      // https://github.com/xiaoymin/swagger-bootstrap-ui/issues/269
-      var reqHeaders = { 'language': that.settings.language };
-      var requestConfig = {
-        url: api,
-        dataType: 'json',
-        timeout: 20000,
-        type: 'get',
-        // # 发送一个语言的header头给后端
-        transformResponse: [function (data) {
-          return KUtils.json5parse(data);
-        }]
+      // 分组文档地址是根路径(如 /v3/api-docs/xxx)而文档页面部署在子目录(如 /doc/)下时,
+      // 根路径会丢失上下文前缀而请求到前端页面上(返回HTML),这里准备一个补上前缀的候选地址备用
+      var apiCandidates = [api];
+      var pageBasePath = that.getPageBasePath();
+      if (pageBasePath != '' && api.charAt(0) == '/' && api.indexOf(pageBasePath + '/') != 0) {
+        apiCandidates.push(pageBasePath + api);
+      }
+      var requestGroupDocument = function () {
+        var requestUrl = apiCandidates.shift();
+        // 此处加上transformResponse参数,防止Long类型在前端丢失精度
+        // https://github.com/xiaoymin/swagger-bootstrap-ui/issues/269
+        var reqHeaders = { 'language': that.settings.language };
+        var requestConfig = {
+          url: requestUrl,
+          dataType: 'json',
+          timeout: 20000,
+          type: 'get',
+          // # 发送一个语言的header头给后端
+          transformResponse: [function (data) {
+            try {
+              return KUtils.json5parse(data);
+            } catch (e) {
+              // 带上实际请求地址,方便定位是后端上下文路径/网关转发问题还是文档地址配置问题
+              var error = new Error('分组文档解析失败,请求地址: ' + requestUrl + ';原因: ' + e.message);
+              error.requestUrl = requestUrl;
+              throw error;
+            }
+          }]
+        };
+        // 针对Knife4jAggregationDesktop软件的请求头
+        if (that.desktop) {
+          reqHeaders = Object.assign({}, reqHeaders, { 'knife4j-gateway-code': that.desktopCode });
+        }
+        if (KUtils.checkUndefined(that.currentInstance.header)) {
+          // Knife4j自研Aggreration微服务聚合组件请求头
+          reqHeaders = Object.assign({}, reqHeaders, { 'knfie4j-gateway-request': that.currentInstance.header });
+        }
+        if (KUtils.checkUndefined(that.currentInstance.basicAuth)) {
+          reqHeaders = Object.assign({}, reqHeaders, { 'knife4j-gateway-basic-request': that.currentInstance.basicAuth });
+        }
+        requestConfig = Object.assign({}, requestConfig, { headers: reqHeaders });
+        that.ajax(requestConfig, data => {
+          that.analysisApiSuccess(data);
+        }, err => {
+          // 还有候选地址时继续尝试(如补上页面所在目录前缀),全部失败才提示
+          if (apiCandidates.length > 0) {
+            requestGroupDocument();
+            return;
+          }
+          message.error('Knife4j文档请求异常');
+          that.error(err);
+        });
       };
-      // 针对Knife4jAggregationDesktop软件的请求头
-      if (that.desktop) {
-        reqHeaders = Object.assign({}, reqHeaders, { 'knife4j-gateway-code': that.desktopCode });
-      }
-      if (KUtils.checkUndefined(this.currentInstance.header)) {
-        // Knife4j自研Aggreration微服务聚合组件请求头
-        reqHeaders = Object.assign({}, reqHeaders, { 'knfie4j-gateway-request': that.currentInstance.header });
-      }
-      if (KUtils.checkUndefined(this.currentInstance.basicAuth)) {
-        reqHeaders = Object.assign({}, reqHeaders, { 'knife4j-gateway-basic-request': that.currentInstance.basicAuth });
-      }
-      requestConfig = Object.assign({}, requestConfig, { headers: reqHeaders });
-      that.ajax(requestConfig, data => {
-        that.analysisApiSuccess(data);
-      }, err => {
-        message.error('Knife4j文档请求异常');
-        that.error(err);
-      })
+      requestGroupDocument();
       /*  DebugAxios.create().request({
          url: api,
          dataType: 'json',
@@ -789,6 +816,17 @@ SwaggerBootstrapUi.prototype.analysisApi = function (instance) {
       console.error(err);
     }
   }
+}
+
+/**
+ * 获取文档页面所在目录(如 /doc/index.html -> /doc),根目录返回空字符串
+ * 用于修正分组文档地址为根路径时丢失上下文前缀的问题
+ */
+SwaggerBootstrapUi.prototype.getPageBasePath = function () {
+  var path = window.location.pathname;
+  var index = path.lastIndexOf('/');
+  var basePath = path.length == index + 1 ? path : path.substring(0, index);
+  return basePath == '/' ? '' : basePath;
 }
 
 /**
@@ -5008,9 +5046,11 @@ SwaggerBootstrapUi.prototype.createApiInfoInstance = function (path, mtype, apiI
   var md5Str = newurl + mtype.toUpperCase();
   swpinfo.id = md5(md5Str);
   swpinfo.versionId = KUtils.md5Id(apiInfo);
+  // 原始OpenAPI数据只在OpenApi页签展示/下载时使用,此处只记录接口路径,
+  // 由buildApiOpenApiRaw在首次访问时按需构建,避免分组解析阶段对每个接口都做一次全量序列化与引用遍历
+  swpinfo.specPath = path;
   if (apiInfo != null) {
     this.readApiSecurity(swpinfo, apiInfo);
-    this.readOpenApiSpeci(path, swpinfo, apiInfo, that.currentInstance.swaggerData, that.currentInstance.openApiBaseInfo);
     if (apiInfo.hasOwnProperty('deprecated')) {
       swpinfo.deprecated = apiInfo['deprecated'];
     }
@@ -5200,59 +5240,97 @@ SwaggerBootstrapUi.prototype.readOpenApiSpeci = function (path, swpinfo, apiInfo
 
 }
 /**
+ * 按需构建接口的原始OpenAPI数据(OpenApi页签使用)
+ * 构建结果缓存在接口对象上,重复访问不会重复计算
+ * @param {*} swpinfo 接口对象
+ * @param {*} instance 分组实例,缺省使用当前实例
+ */
+SwaggerBootstrapUi.prototype.buildApiOpenApiRaw = function (swpinfo, instance) {
+  if (swpinfo == null || swpinfo == undefined) {
+    return {};
+  }
+  var cached = swpinfo.openApiRaw;
+  if (cached != null && cached != undefined && typeof cached == 'object') {
+    return cached;
+  }
+  var ins = instance || this.currentInstance;
+  if (ins == null || ins == undefined) {
+    return swpinfo.openApiRaw;
+  }
+  this.readOpenApiSpeci(swpinfo.specPath, swpinfo, swpinfo.originalApiInfo, ins.swaggerData, ins.openApiBaseInfo);
+  return swpinfo.openApiRaw;
+}
+/**
+ * 递归遍历OpenAPI对象,收集所有$ref引用的模型名称
+ * 早期实现是先把对象序列化成字符串再用正则匹配$ref,大对象下序列化开销明显,
+ * 这里直接遍历对象,只做一次深度优先扫描
+ * @param {*} node 待遍历节点
+ * @param {*} prefix $ref前缀,如 '#/components/schemas/'
+ * @param {*} modelArrays 收集到的模型名集合(边遍历边追加)
+ * @param {*} seen 已收集模型名的Set,用于去重
+ */
+function collectRefModels(node, prefix, modelArrays, seen) {
+  if (node == null || typeof node != 'object') {
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (var i = 0; i < node.length; i++) {
+      collectRefModels(node[i], prefix, modelArrays, seen);
+    }
+    return;
+  }
+  var ref = node['$ref'];
+  if (typeof ref == 'string' && ref.indexOf(prefix) == 0) {
+    var modelName = ref.substring(prefix.length);
+    // $ref可能带子路径(如 #/components/schemas/Foo/properties/bar),只取模型名
+    var slashIndex = modelName.indexOf('/');
+    if (slashIndex > -1) {
+      modelName = modelName.substring(0, slashIndex);
+    }
+    if (modelName != '' && !seen.has(modelName)) {
+      seen.add(modelName);
+      modelArrays.push(modelName);
+    }
+  }
+  for (var key in node) {
+    if (key == '$ref') {
+      continue;
+    }
+    var child = node[key];
+    if (child != null && typeof child == 'object') {
+      collectRefModels(child, prefix, modelArrays, seen);
+    }
+  }
+}
+/**
  * OAS2结构
  * @param {*} apiInfo
  * @param {*} swaggerData
  */
 SwaggerBootstrapUi.prototype.readOpenApiSpeciOAS2 = function (apiInfo, swaggerData) {
   var definitionCopy = {};
-  var apiStr = KUtils.json5stringify(apiInfo);
-  var reg = new RegExp('\'#/definitions/(.*?)\'', 'ig');
-  let result;
-  var definitions = swaggerData['definitions'];
+  var definitions = swaggerData['definitions'] || {};
   var modelArrays = new Array();
-  while ((result = reg.exec(apiStr)) != null) {
-    var model = result[1];
-    if (KUtils.checkUndefined(model)) {
-      if (!modelArrays.includes(model)) {
-        modelArrays.push(model);
-      }
-    }
+  var seen = new Set();
+  collectRefModels(apiInfo, '#/definitions/', modelArrays, seen);
+  // modelArrays会被readOpenAPIModel持续追加,因此用下标遍历即可展开全部引用层级
+  for (var i = 0; i < modelArrays.length; i++) {
+    readOpenAPIModel(modelArrays[i], modelArrays, definitions, true, seen);
   }
-  if (modelArrays.length > 0) {
-    // 不为空,找model的子属性是否包含model
-    modelArrays.forEach(model => {
-      readOpenAPIModel(model, modelArrays, definitions, true);
-    })
-    modelArrays.forEach(model => {
+  modelArrays.forEach(model => {
+    if (KUtils.checkUndefined(definitions[model])) {
       definitionCopy[model] = definitions[model];
-    })
-  }
+    }
+  })
   return definitionCopy;
 }
 
-function readOpenAPIModel(model, modelArrays, definitions, oas2) {
+function readOpenAPIModel(model, modelArrays, definitions, oas2, seen) {
   if (KUtils.checkUndefined(model) && KUtils.strNotBlank(model)) {
     var def = definitions[model];
     if (KUtils.checkUndefined(def)) {
-      var defStr = KUtils.json5stringify(def);
-      // 找子属性的model
-      var reg;
-      if (oas2) {
-        reg = new RegExp('\'#/definitions/(.*?)\'', 'ig');
-      } else {
-        reg = new RegExp('\'#/components/schemas/(.*?)\'', 'ig');
-      }
-      let result;
-      while ((result = reg.exec(defStr)) != null) {
-        var cmodel = result[1];
-        if (KUtils.checkUndefined(cmodel)) {
-          if (!modelArrays.includes(cmodel)) {
-            modelArrays.push(cmodel);
-            readOpenAPIModel(cmodel, modelArrays, definitions, oas2);
-          }
-        }
-      }
+      // 找子属性的model,新发现的模型会直接追加到modelArrays中
+      collectRefModels(def, oas2 ? '#/definitions/' : '#/components/schemas/', modelArrays, seen);
     }
   }
 }
@@ -5263,28 +5341,19 @@ function readOpenAPIModel(model, modelArrays, definitions, oas2) {
  */
 SwaggerBootstrapUi.prototype.readOpenApiSpeciOAS3 = function (apiInfo, swaggerData) {
   var definitionCopy = {};
-  var apiStr = KUtils.json5stringify(apiInfo);
-  var reg = new RegExp('\'#/components/schemas/(.*?)\'', 'ig');
-  let result;
   var definitions = KUtils.propValue('schemas', swaggerData['components'] || {}, null) || {};
   var modelArrays = new Array();
-  while ((result = reg.exec(apiStr)) != null) {
-    var model = result[1];
-    if (KUtils.checkUndefined(model)) {
-      if (!modelArrays.includes(model)) {
-        modelArrays.push(model);
-      }
-    }
+  var seen = new Set();
+  collectRefModels(apiInfo, '#/components/schemas/', modelArrays, seen);
+  // modelArrays会被readOpenAPIModel持续追加,因此用下标遍历即可展开全部引用层级
+  for (var i = 0; i < modelArrays.length; i++) {
+    readOpenAPIModel(modelArrays[i], modelArrays, definitions, false, seen);
   }
-  if (modelArrays.length > 0) {
-    // 不为空,找model的子属性是否包含model
-    modelArrays.forEach(model => {
-      readOpenAPIModel(model, modelArrays, definitions, false);
-    })
-    modelArrays.forEach(model => {
+  modelArrays.forEach(model => {
+    if (KUtils.checkUndefined(definitions[model])) {
       definitionCopy[model] = definitions[model];
-    })
-  }
+    }
+  })
   return definitionCopy;
 }
 /**
@@ -7270,6 +7339,8 @@ var SwaggerBootstrapUiApiInfo = function () {
   this.oas2 = true;
   // 2020年10月22日,增加OpenAPI原始数据,方便POSTMAN导入测试
   this.openApiRaw = '';
+  // 接口在paths中的路径,用于按需构建openApiRaw
+  this.specPath = '';
   // 原始对象
   this.originalApiInfo = null;
   this.url = null;

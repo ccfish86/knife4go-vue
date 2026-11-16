@@ -60,7 +60,8 @@
     </div>
       <!-- 请求参数 -->
     <div class="api-title" v-html="$t('doc.params')"></div>
-    <a-table :defaultExpandAllRows="expanRows" :columns="columns" :dataSource="reqParameters" rowKey="id" size="small"
+    <!-- key跟随apiInitVersion变化,保证接口解析完成后重新挂载表格,让defaultExpandAllRows能对新的树形数据生效 -->
+    <a-table :key="'reqParameters-' + apiInitVersion" :defaultExpandAllRows="expanRows" :columns="columns" :dataSource="reqParameters" rowKey="id" size="small"
       :pagination="page">
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'description'">
@@ -107,7 +108,7 @@
           <!--响应参数-->
           <!-- 响应参数 -->
           <div class="api-title" v-html="$t('doc.responseParams')"></div>
-          <a-table :defaultExpandAllRows="expanRows" :columns="responseParametersColumns" :dataSource="resp.data"
+          <a-table :key="'responseParameters-' + resp.code + '-' + apiInitVersion" :defaultExpandAllRows="expanRows" :columns="responseParametersColumns" :dataSource="resp.data"
             rowKey="id" size="small" :pagination="page">
             <template slot="descriptionTemplate" slot-scope="text">
               <span v-html="text"></span>
@@ -144,7 +145,7 @@
       <!--响应参数-->
         <!--  响应参数 -->
       <div class="api-title" v-html="$t('doc.responseParams')"></div>
-       <a-table :defaultExpandAllRows="expanRows" :columns="responseParametersColumns" :dataSource="multipData.data"
+       <a-table :key="'responseParameters-single-' + apiInitVersion" :defaultExpandAllRows="expanRows" :columns="responseParametersColumns" :dataSource="multipData.data"
          rowKey="id" size="small" :pagination="page">
          <template slot="descriptionTemplate" slot-scope="text">
            <span v-html="text"></span>
@@ -212,6 +213,11 @@
      swaggerInstance: {
        type: Object,
        required: true
+     },
+     // 接口二次解析的完成版本号,父组件解析完成后+1,通知本组件重构表格数据
+     apiInitVersion: {
+       type: Number,
+       default: 0
      }
    },
    setup() {
@@ -248,7 +254,8 @@
        // 接收一个响应信息对象,遍历得到树形结构的值
        multipCode: false,
        multipCodeDatas: [],
-       multipData: {},
+       // 接口解析延后执行时首帧可能还没有响应数据,这里保持数组结构避免表格取到undefined
+       multipData: { data: [] },
        page: false,
        reqParameters: []
      };
@@ -273,6 +280,11 @@
    watch: {
      language: function (val, oldval) {
        this.initI18n();
+     },
+     // 接口解析已改为首帧后异步执行,数据就绪后需要按新的参数/响应数据重建表格行
+     apiInitVersion: function () {
+       this.initRequestParams();
+       this.initResponseCodeParams();
      }
    },
    methods: {
@@ -505,10 +517,6 @@
                          );
                          newObj.pid = param.id;
                          if (newObj.children) {
-                           // 递归过滤更深层次忽略的属性
-                           const childrens = JSON.parse(
-                             JSON.stringify(newObj.children)
-                           ); // 深拷贝原始集合
                            const currentIgnores = ignoreParameterAllKeys
                              .map(key => {
                                if (
@@ -524,10 +532,18 @@
                                return null;
                              })
                              .filter(Boolean);
-                           newObj.children = that.filterChildrens(
-                             currentIgnores,
-                             childrens
-                           );
+                           // 没有需要忽略的属性时不需要深拷贝整棵子树
+                           // (深拷贝是逐层递归的,模型越深越大开销越高)
+                           if (currentIgnores.length > 0) {
+                             // 递归过滤更深层次忽略的属性
+                             const childrens = JSON.parse(
+                               JSON.stringify(newObj.children)
+                             ); // 深拷贝原始集合
+                             newObj.children = that.filterChildrens(
+                               currentIgnores,
+                               childrens
+                             );
+                           }
                          }
                          return newObj;
                        });
@@ -726,7 +742,7 @@
        // 添加自定义属性
        that.multipCode = this.api.multipartResponseSchema;
        that.multipCodeDatas = [];
-       that.multipData = {};
+       that.multipData = { data: [] };
        let rcodes = this.api.responseCodes;
        if (rcodes != null && rcodes != undefined) {
          // 单响应展示时优先选择成功响应，否则取第一个有内容的响应
@@ -805,7 +821,7 @@
              currentResponse = nresobj;
            }
          });
-         that.multipData = currentResponse || firstResponse || {};
+         that.multipData = currentResponse || firstResponse || { data: [] };
        }
      },
      /**

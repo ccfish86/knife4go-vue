@@ -41,6 +41,14 @@ export default {
       editorHeight: 200
     };
   },
+  watch: {
+    // 内容可能在组件挂载后才到达(接口解析延后完成、切换示例等),需要按实际行数重算高度
+    value: function () {
+      if (this.editor != null) {
+        this.resetEditorHeight();
+      }
+    }
+  },
   methods: {
     change(value) {
       this.$emit("change", value);
@@ -49,11 +57,18 @@ export default {
       const that = this
       // 重设高度
       setTimeout(() => {
+        if (that.editor == null || that.editor.session == null) {
+          return;
+        }
         let length_editor = that.editor.session.getLength()
         if (length_editor == 1) {
           length_editor = 10;
         }
-        that.editorHeight = length_editor * 16;
+        // 行数未变化时不触发重排,避免每次输入都引起高度更新
+        const newHeight = length_editor * 16;
+        if (newHeight != that.editorHeight) {
+          that.editorHeight = newHeight;
+        }
       }, 300);
     },
     editorInit(editor) {
